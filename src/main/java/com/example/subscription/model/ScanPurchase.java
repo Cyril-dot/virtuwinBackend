@@ -118,4 +118,15 @@ public class ScanPurchase {
 
     public LocalDateTime getUsedAt() { return usedAt; }
     public void setUsedAt(LocalDateTime usedAt) { this.usedAt = usedAt; }
+
+    /**
+     * True only when this purchase has been APPROVED (by admin review on the
+     * MANUAL path, or automatically via AkwaPay confirming payment) and has
+     * not already been consumed by a scan. Each purchase can only be used
+     * once - see ScanService.analyze(), which calls this as a gate before
+     * running the AI scan and then calls markUsed() to set usedAt.
+     */
+    public boolean isReadyToScan() {
+        return status == ScanPurchaseStatus.APPROVED && usedAt == null;
+    }
 }
