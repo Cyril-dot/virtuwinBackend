@@ -2,7 +2,6 @@ package com.example.subscription.controller;
 
 import com.example.subscription.dto.ApiResponse;
 import com.example.subscription.dto.SubscriptionAkwaPayInitRequest;
-import com.example.subscription.dto.SubscriptionAkwaPayOtpRequest;
 import com.example.subscription.model.AkwaPayPayment;
 import com.example.subscription.service.SubscriptionAkwaPayService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,16 +17,17 @@ import java.util.Map;
  * AkwaPay-funded replacement for {@link ManualPaymentController}'s manual
  * screenshot flow. Same user-facing shape as ManualPaymentController's
  * /status/{id} endpoint (including the one-time password reveal), plus the
- * AkwaPay-specific init/otp/webhook plumbing.
+ * AkwaPay-specific init/webhook plumbing.
  *
  * Flow:
  *   1. POST /api/payment/akwapay/init
  *        -> creates AkwaPayPayment (status=AWAITING_PAYMENT) + AkwaPay
  *           intent, returns { paymentId, akwapay: {...} }.
- *   2. Frontend follows next_action.type same as any AkwaPay flow:
- *        await_prompt | redirect | submit_otp | none, or just uses
- *        checkout_url, which handles all four.
- *      - if submit_otp: POST /api/payment/akwapay/otp
+ *   2. Frontend follows next_action.type from the init response, or just
+ *      uses checkout_url. See SubscriptionAkwaPayService's class-level
+ *      "GATEWAY CHANGE" note: Flutterwave v4 mobile money uses
+ *      next_action.type = "payment_instruction" (a push prompt), not
+ *      "submit_otp" — there is no OTP endpoint on this controller any more.
  *   3. GET /api/payment/akwapay/intent-status/{intentId} - poll AkwaPay's
  *      own intent status for UI purposes only; does NOT approve anything.
  *   4. GET /api/payment/akwapay/status/{paymentId} - poll THIS for the
@@ -66,12 +66,6 @@ public class SubscriptionAkwaPayController {
     public ApiResponse<Object> intentStatus(@PathVariable String intentId) {
         var result = akwaPayService.akwapayIntentStatus(intentId);
         return ApiResponse.ok("AkwaPay intent status", result);
-    }
-
-    @PostMapping("/api/payment/akwapay/otp")
-    public ApiResponse<Object> submitOtp(@RequestBody SubscriptionAkwaPayOtpRequest req) {
-        var result = akwaPayService.submitOtp(req.getIntentId(), req.getClientSecret(), req.getOtp());
-        return ApiResponse.ok("OTP submitted", result);
     }
 
     /**

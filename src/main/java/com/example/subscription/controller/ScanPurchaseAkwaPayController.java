@@ -2,7 +2,6 @@ package com.example.subscription.controller;
 
 import com.example.subscription.dto.ApiResponse;
 import com.example.subscription.dto.ScanAkwaPayInitRequest;
-import com.example.subscription.dto.ScanAkwaPayOtpRequest;
 import com.example.subscription.service.ScanPurchaseAkwaPayService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -17,10 +16,11 @@ import org.springframework.web.bind.annotation.*;
  *   1. POST /api/scan/payment/akwapay/init
  *        -> creates ScanPurchase (status=AWAITING_PAYMENT) + AkwaPay intent,
  *           returns AkwaPay's response (incl. next_action / checkout_url).
- *   2. Frontend follows next_action.type same as any AkwaPay flow:
- *        await_prompt | redirect | submit_otp | none, or just uses
- *        checkout_url, which handles all four.
- *      - if submit_otp: POST /api/scan/payment/akwapay/otp
+ *   2. Frontend follows next_action.type from the init response, or just
+ *      uses checkout_url. See ScanPurchaseAkwaPayService's class-level
+ *      "GATEWAY CHANGE" note: Flutterwave v4 mobile money uses
+ *      next_action.type = "payment_instruction" (a push prompt), not
+ *      "submit_otp" — there is no OTP endpoint on this controller any more.
  *   3. GET /api/scan/payment/akwapay/status/{intentId} - poll for UI purposes
  *      only; does NOT approve anything (same guarantee as
  *      AkwaPayController#status — a user hitting return_url proves nothing).
@@ -58,12 +58,6 @@ public class ScanPurchaseAkwaPayController {
     public ApiResponse<Object> status(@PathVariable String intentId) {
         var result = akwaPayService.status(intentId);
         return ApiResponse.ok("AkwaPay intent status", result);
-    }
-
-    @PostMapping("/api/scan/payment/akwapay/otp")
-    public ApiResponse<Object> submitOtp(@RequestBody ScanAkwaPayOtpRequest req) {
-        var result = akwaPayService.submitOtp(req.getIntentId(), req.getClientSecret(), req.getOtp());
-        return ApiResponse.ok("OTP submitted", result);
     }
 
     /**

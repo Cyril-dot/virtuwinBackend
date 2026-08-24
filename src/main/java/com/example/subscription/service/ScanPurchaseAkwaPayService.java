@@ -86,6 +86,20 @@ import java.util.UUID;
  * The real email is preserved in metadata for audit.
  *
  * ─────────────────────────────────────────────────────────────────────────
+ * WEBHOOK SECRET IS PER-ENDPOINT, NOT PER-ACCOUNT
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * AkwaPay issues a separate signing secret (whsec_...) for each registered
+ * webhook URL, not one secret for the whole account. This service's webhook
+ * lives at /api/webhooks/akwapay/scan, so it must use the whsec_ AkwaPay
+ * shows for THAT specific URL in the dashboard — app.akwapay.webhook-secret.scan.
+ * SubscriptionAkwaPayService's /api/webhooks/akwapay/subscription endpoint
+ * has its own, different secret (app.akwapay.webhook-secret.subscription).
+ * Do not point both properties at the same value, and do not collapse them
+ * back into one shared app.akwapay.webhook-secret — verifySignature() will
+ * silently reject every event on whichever endpoint has the wrong secret.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
  * RELIABILITY GUARANTEE
  * ─────────────────────────────────────────────────────────────────────────
  *
@@ -132,10 +146,10 @@ public class ScanPurchaseAkwaPayService {
     private final WebClient.Builder                          webClientBuilder;
     private final ObjectMapper                                objectMapper;
 
-    @Value("${app.akwapay.secret-key}")     private String secretKey;
-    @Value("${app.akwapay.webhook-secret}") private String webhookSecret;
-    @Value("${app.akwapay.base-url}")       private String baseUrl;
-    @Value("${app.platform.frontend-url}")  private String frontendUrl;
+    @Value("${app.akwapay.secret-key}")               private String secretKey;
+    @Value("${app.akwapay.webhook-secret.scan}")      private String webhookSecret;
+    @Value("${app.akwapay.base-url}")                 private String baseUrl;
+    @Value("${app.platform.frontend-url}")            private String frontendUrl;
 
     private final Duration akwapayTimeout    = Duration.ofSeconds(15);
     private final long     akwapayRetryLimit = 2;
