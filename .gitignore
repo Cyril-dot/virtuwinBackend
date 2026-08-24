@@ -1,0 +1,121 @@
+# ==============================
+# Environment / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# API keys / credentials
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# ==============================
+# Java / Maven
+# ==============================
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Maven
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ==============================
+# Spring Boot
+# ==============================
+application-local.properties
+application-local.yml
+application-secret.properties
+application-secret.yml
+
+# ==============================
+# Logs
+# ==============================
+logs/
+*.log
+
+# ==============================
+# IDE - IntelliJ IDEA
+# ==============================
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ==============================
+# VS Code
+# ==============================
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ==============================
+# Eclipse
+# ==============================
+.classpath
+.project
+.settings/
+.factorypath
+
+# ==============================
+# NetBeans
+# ==============================
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# ==============================
+# OS files
+# ==============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==============================
+# Temporary files
+# ==============================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ==============================
+# Test / coverage
+# ==============================
+coverage/
+jacoco.exec
+
+# ==============================
+# Build artifacts
+# ==============================
+build/
+bin/
+
+# ==============================
+# Uploads / generated files
+# ==============================
+uploads/
+temp/
+tmp/
+
+# ==============================
+# Docker
+# ==============================
+.docker/
+docker-data/
+
+# ==============================
+# Generated AI / scan files
+# ==============================
+scan-output/
+ai-output/
+predator-scan/.env
