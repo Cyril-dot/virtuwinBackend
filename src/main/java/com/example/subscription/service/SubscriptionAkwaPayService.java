@@ -77,6 +77,10 @@ import java.util.UUID;
  *
  *     sbsub-<32-hex nonce>-<8-hex nonce>     subscription payment
  *
+ * NOTE: a single UUID (hyphens stripped) only yields 32 hex characters, so
+ * two UUIDs are concatenated below to have enough characters for both the
+ * 32-char and 8-char segments. Do not shrink this back to a single UUID.
+ *
  * ─────────────────────────────────────────────────────────────────────────
  * WHY customer.email IS SYNTHETIC (PER-ATTEMPT)
  * ─────────────────────────────────────────────────────────────────────────
@@ -652,9 +656,16 @@ public class SubscriptionAkwaPayService {
     // underscores in tx_ref. Purely a unique+prefixed token — routing back
     // to an AkwaPayPayment happens via the in-memory pendingIntents map
     // keyed on the full reference, same as the scan flow.
+    //
+    // A single UUID (hyphens stripped) yields only 32 hex chars, which is
+    // exactly the length of the first segment alone — there's nothing left
+    // for the second 8-char segment, causing a StringIndexOutOfBounds /
+    // substring range error. Two UUIDs concatenated give 64 hex chars,
+    // comfortably covering both segments (32 + 8 = 40 needed).
 
     private String buildReference() {
-        var nonceSource = UUID.randomUUID().toString().replace("-", "");
+        var nonceSource = (UUID.randomUUID().toString() + UUID.randomUUID().toString())
+                .replace("-", "");
         return REF_PREFIX_SUB + nonceSource.substring(0, 32) + "-" + nonceSource.substring(32, 40);
     }
 
