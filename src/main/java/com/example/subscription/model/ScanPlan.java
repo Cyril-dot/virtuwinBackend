@@ -17,9 +17,9 @@ package com.example.subscription.model;
  */
 public enum ScanPlan {
 
-    BASIC("SCAN_300", 300, 3),
-    STANDARD("SCAN_500", 500, 5),
-    PREMIUM("SCAN_1000", 1000, -1); // -1 = no cap, full coverage
+    BASIC("SCAN_300", 1, 3),// 400
+    STANDARD("SCAN_500", 1, 5), // 700
+    PREMIUM("SCAN_1000", 1, -1); //1000
 
     private final String code;
     private final int amountCedis;

@@ -7,9 +7,9 @@ package com.example.subscription.model;
  */
 public enum Plan {
 
-    TWO_HOUR("2HR", 200, 2),
-    THREE_HOUR("3HR", 350, 3),
-    FIVE_HOUR("5HR", 500, 5);
+    TWO_HOUR("2HR", 1, 2),//300
+    THREE_HOUR("3HR", 1, 3), // 400
+    FIVE_HOUR("5HR", 1, 5); // 700
 
     private final String code;
     private final int amountCedis;
