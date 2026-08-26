@@ -48,43 +48,11 @@ import java.util.stream.Stream;
  *   nvidia     https://integrate.api.nvidia.com/v1                <- secondary multimodal models
  *   huggingface https://router.huggingface.co/v1                  <- optional last-resort VLM
  *
- * GEMINI NOTE: Google's Gemini API exposes an OpenAI-compatible endpoint at
- * /v1beta/openai/chat/completions. As of the free tier rules in effect since
- * April 1 2026, only Flash-class models are free (Pro models are paid-only),
- * so the default model list below sticks to Flash / Flash-Lite. Get a key at
- * https://aistudio.google.com/apikey and set ai.gemini.api-key (or GEMINI_API_KEY
- * if you wire that into the property). NOTE: gemini-2.5-flash and
- * gemini-2.5-flash-lite are scheduled to shut down on 2026-10-16 - when that
- * date passes, drop them from ai.gemini.models (or this will start failing with
- * HTTP 404) and lean on gemini-3-flash / gemini-3.1-flash-lite instead.
- *
- * GEMINI MULTI-KEY NOTE: you can now supply MULTIPLE Gemini API keys via
- * ai.gemini.api-keys=key1,key2,key3 (comma-separated). Each key is expanded
- * into its own Provider in the attempt chain, in the order given, each trying
- * every model in ai.gemini.models before moving to the next key. This means a
- * key that is rate-limited (429) or out of free-tier credits (402) fails over
- * to the next Gemini key BEFORE the chain ever falls through to Cerebras.
- * ai.gemini.api-key (singular) still works as a one-key shorthand and is used
- * only if ai.gemini.api-keys is not set. The same ai.<id>.api-keys pattern
- * works for any provider, not just gemini.
- *
- * CEREBRAS NOTE: Cerebras Inference is an OpenAI-compatible endpoint too, but
- * vision (image input) is currently only supported by gemma-4-31b - it is the
- * only model in the default list. Free-tier accounts are capped at 2 images per
- * request, which is fine here since we only ever send one. Get a key at
- * https://cloud.cerebras.ai and set ai.cerebras.api-key (or ai.cerebras.api-keys
- * for multiple Cerebras keys, same pattern as Gemini).
- *
- * Providers whose API key(s) are blank are SKIPPED, so you can deploy with only
- * one of the two keys set (though both is recommended so Cerebras can cover
- * Gemini outages/rate limits and vice versa).
- *
- * LOGGING: every scan gets a short trace id (MDC key "scanId") that prefixes all
- * log lines for that request, so concurrent scans stay untangled in the log file.
- * Each attempt logs the outbound request summary, HTTP status, latency, token
- * usage, finish reason, and a preview of the returned content. A summary table
- * of all attempts is printed at the end whether the scan succeeded or failed.
- * API keys are always masked; the base64 image is never logged.
+ * Each pick now returns:
+ *   - teamName         : the home and away team names as read from the slip
+ *   - prediction       : 1, X, or 2
+ *   - accuracyPercent  : integer 0-100 representing model confidence
+ *   - reason           : exactly one line, ~10 words explaining the call
  */
 @Service
 public class NvidiaAiService {
@@ -105,11 +73,6 @@ public class NvidiaAiService {
     @Value("${ai.providers:openrouter,nvidia,huggingface}")
     private String providersRaw;
 
-    /**
-     * Per-attempt timeout. A vision model producing 2-4k tokens of JSON with
-     * stream=false routinely needs 20-60s, so a short default guarantees that
-     * every model in the chain "times out".
-     */
     @Value("${ai.attempt-timeout-seconds:60}")
     private long attemptTimeoutSeconds;
 
@@ -126,15 +89,12 @@ public class NvidiaAiService {
 
     // ---- logging switches ----------------------------------------------
 
-    /** Log the full model output text on every attempt (not just a preview). */
     @Value("${ai.log.full-response:false}")
     private boolean logFullResponse;
 
-    /** Log the outbound JSON body (image data URI is always redacted). */
     @Value("${ai.log.request-body:false}")
     private boolean logRequestBody;
 
-    /** Characters of model output shown in the preview line. */
     @Value("${ai.log.preview-chars:400}")
     private int previewChars;
 
@@ -156,7 +116,6 @@ public class NvidiaAiService {
         }
     }
 
-    /** Per-attempt outcome, collected for the end-of-scan summary table. */
     private static final class AttemptResult {
         String label;
         boolean success;
@@ -171,14 +130,14 @@ public class NvidiaAiService {
     public static class ScanAnalysis {
         public int totalPicksDetected;
         public List<PickPrediction> predictions = new ArrayList<>();
-        public String rawModelOutput;   // populated only if JSON parsing failed
-        public String modelUsed;        // which model actually answered
-        public String providerUsed;     // which provider it came from
-        public String scanId;           // trace id, matches the log lines
+        public String rawModelOutput;
+        public String modelUsed;
+        public String providerUsed;
+        public String scanId;
     }
 
     // ------------------------------------------------------------------
-    // Public entry point (signature unchanged)
+    // Public entry point
     // ------------------------------------------------------------------
 
     public ScanAnalysis analyzeSlip(String imageBase64, String imageMediaType, ScanPlan plan) {
@@ -199,9 +158,7 @@ public class NvidiaAiService {
                 log.error("No usable provider. Configured chain=[{}] but none had an API key.", providersRaw);
                 throw new ApiException(
                         "AI scanning is not configured: no provider in [" + providersRaw +
-                                "] has an API key set. Configure the provider-specific " +
-                                "ai.<provider>.api-key or ai.<provider>.api-keys property, starting with " +
-                                "NVIDIA_API_KEY for NVIDIA.",
+                                "] has an API key set.",
                         HttpStatus.SERVICE_UNAVAILABLE);
             }
 
@@ -257,6 +214,10 @@ public class NvidiaAiService {
                     log.info("<<< SUCCESS [{}] {}ms, {} pick(s) of {} detected",
                             attempt.label(), ar.millis, analysis.predictions.size(),
                             analysis.totalPicksDetected);
+
+                    // ---- print full pick table to log ----
+                    logPickTable(analysis, attempt.label());
+
                     logSummary(results, attempts.size(), System.currentTimeMillis() - scanStarted, true);
                     return analysis;
 
@@ -286,7 +247,36 @@ public class NvidiaAiService {
         }
     }
 
-    /** Prints an aligned table of every attempt so one glance explains the outcome. */
+    /**
+     * Prints a human-readable table of every pick returned by the model.
+     * Columns: #  | Teams                          | Pred | Accuracy | Reason
+     */
+    private void logPickTable(ScanAnalysis analysis, String label) {
+        if (analysis.predictions.isEmpty()) {
+            log.info("[{}] No picks to display.", label);
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n=== PICKS [").append(label).append("] — ")
+                .append(analysis.predictions.size()).append(" of ")
+                .append(analysis.totalPicksDetected).append(" detected ===\n");
+        sb.append(String.format("%-4s %-34s %-5s %-9s %s%n",
+                "#", "TEAMS", "PRED", "ACCURACY", "REASON"));
+        sb.append("-".repeat(90)).append("\n");
+
+        for (PickPrediction p : analysis.predictions) {
+            sb.append(String.format("%-4d %-34s %-5s %-9s %s%n",
+                    p.getSectionIndex(),
+                    truncate(p.getTeamName(), 34),
+                    p.getPrediction(),
+                    p.getAccuracyPercent() + "%",
+                    truncate(p.getReason(), 80)));
+        }
+        sb.append("=".repeat(90));
+        log.info(sb.toString());
+    }
+
     private void logSummary(List<AttemptResult> results, int totalAttempts, long totalMs, boolean success) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n=== SCAN SUMMARY (").append(success ? "SUCCESS" : "ALL FAILED")
@@ -320,25 +310,6 @@ public class NvidiaAiService {
     // Provider / chain construction
     // ------------------------------------------------------------------
 
-    /**
-     * Builds the full ordered list of attempts.
-     *
-     * For each provider id in ai.providers (default "openrouter,nvidia,huggingface"):
-     *   1. Resolve its base URL and model list (falling back to the built-in
-     *      defaults in defaultBaseUrl()/defaultModels() if not configured).
-     *   2. Resolve its API key(s):
-     *        - ai.<id>.api-keys  (comma-separated, preferred - supports N keys)
-     *        - ai.<id>.api-key   (single key, used only if api-keys is blank)
-     *   3. Expand into one Provider PER KEY, each carrying the SAME model list.
-     *      Provider ids become "<id>-key1", "<id>-key2", ... when there is more
-     *      than one key, so the attempt-chain log and the summary table make it
-     *      obvious which key answered (or failed) without ever printing the key
-     *      itself - see mask().
-     *   4. Flatten every (key x model) pair into the attempt chain, in order:
-     *      all models for key 1, then all models for key 2, etc. A key that is
-     *      rate-limited or out of credits therefore fails over to the NEXT KEY
-     *      of the same provider before the chain moves on to the next provider.
-     */
     private List<Attempt> buildAttemptChain() {
         List<Attempt> chain = new ArrayList<>();
 
@@ -385,11 +356,6 @@ public class NvidiaAiService {
         return chain;
     }
 
-    /**
-     * Resolves the ordered list of API keys for a provider id.
-     * Prefers ai.<id>.api-keys (comma-separated list, dedup'd, blanks dropped).
-     * Falls back to the single ai.<id>.api-key property when api-keys is unset.
-     */
     private List<String> resolveApiKeys(String id) {
         List<String> apiKeys = splitCsv(env.getProperty("ai." + id + ".api-keys", ""));
         if (!apiKeys.isEmpty()) {
@@ -404,25 +370,15 @@ public class NvidiaAiService {
 
     private String defaultBaseUrl(String id) {
         return switch (id) {
-            case "openrouter" -> "https://openrouter.ai/api/v1";
-            case "nvidia" -> "https://integrate.api.nvidia.com/v1";
+            case "openrouter"  -> "https://openrouter.ai/api/v1";
+            case "nvidia"      -> "https://integrate.api.nvidia.com/v1";
             case "huggingface" -> "https://router.huggingface.co/v1";
-            case "gemini" -> "https://generativelanguage.googleapis.com/v1beta/openai";
-            case "cerebras" -> "https://api.cerebras.ai/v1";
+            case "gemini"      -> "https://generativelanguage.googleapis.com/v1beta/openai";
+            case "cerebras"    -> "https://api.cerebras.ai/v1";
             default -> null;
         };
     }
 
-    /**
-     * Multimodal-capable defaults. The final model for the primary providers is
-     * intentionally a specialist vision fallback, while Hugging Face is optional.
-     *
-     * VERIFY these against the provider's live catalog before deploying - model
-     * ids and free-tier eligibility change, and a retired id returns a 404 that
-     * looks like an outage. In particular: gemini-2.5-flash and
-     * gemini-2.5-flash-lite are slated to shut down 2026-10-16 - after that,
-     * ai.gemini.models should drop to just gemini-3-flash,gemini-3.1-flash-lite.
-     */
     private String defaultModels(String id) {
         return switch (id) {
             case "openrouter" -> String.join(",",
@@ -435,9 +391,7 @@ public class NvidiaAiService {
                     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
                     "nvidia/nemotron-nano-12b-v2-vl",
                     "meta/llama-3.2-90b-vision-instruct");
-            // Optional last-resort HF vision model; only used if HF_TOKEN is set.
             case "huggingface" -> "Qwen/Qwen2.5-VL-7B-Instruct";
-            // Optional providers retained for backwards compatibility.
             case "gemini" -> String.join(",",
                     "gemini-2.5-flash",
                     "gemini-2.5-flash-lite",
@@ -468,10 +422,6 @@ public class NvidiaAiService {
                 "role", "user",
                 "content", List.of(textContent, imageContent));
 
-        // ONE schema only. The previous version had a system prompt demanding
-        // {"predictions":[{"matchNumber",...}]} and a user prompt demanding
-        // {"picks":[{"sectionIndex",...}]}, while the parser only read the second -
-        // so a model that obeyed the system prompt produced zero picks.
         Map<String, Object> systemMessage = Map.of(
                 "role", "system",
                 "content",
@@ -484,7 +434,9 @@ public class NvidiaAiService {
                 - For each fixture predict exactly ONE outcome: Home Win (1), Draw (X), or Away Win (2).
                 - Base predictions on the odds shown, implied probabilities, recognizable team strength,
                   and football reasoning. Never just pick the lowest odds automatically. Consider upsets and draws.
-                - If image quality prevents reading a fixture, set its prediction to "unreadable" rather than guessing.
+                - Provide an accuracyPercent (0-100) reflecting your confidence in the prediction.
+                  Use 80-95 for strong signals, 60-79 for moderate, below 60 for uncertain.
+                - If image quality prevents reading a fixture, set prediction to "unreadable" and accuracyPercent to 0.
                 - Never fabricate fixtures or odds that are not visible in the image.
 
                 Return ONLY a single valid JSON object. No markdown, no code fences, no text outside the JSON.
@@ -510,23 +462,25 @@ public class NvidiaAiService {
                   "Analyze at most the first " + plan.getMaxPicks() + " picks/sections on the slip, " +
                   "in the order they appear, and leave the rest out entirely.";
 
-        return "You are looking at an image of a sports betting slip/coupon containing one or more " +
-                "individual picks (each pick is one section of the slip: teams, market, odds).\n\n" +
+        return "You are looking at an image of a sports betting slip containing one or more picks.\n\n" +
                 "1. Count and identify every distinct pick/section on the slip, in printed order.\n" +
                 "2. " + coverageInstruction + "\n" +
-                "3. For each analyzed pick give your own independent prediction (not just a restatement " +
-                "of the slip), a confidence level, and a 1-3 sentence analysis.\n\n" +
+                "3. For each analyzed pick provide:\n" +
+                "   - teamName        : \"Home Team vs Away Team\" as printed on the slip\n" +
+                "   - prediction      : 1 (home win), X (draw), or 2 (away win)\n" +
+                "   - accuracyPercent : integer 0-100 reflecting your confidence (not the slip odds)\n" +
+                "   - reason          : exactly ONE line of ~10 words explaining the prediction\n\n" +
                 "Respond with ONLY a single JSON object matching exactly this shape:\n" +
                 "{\n" +
-                "  \"totalPicksDetected\": <integer, total picks found on the whole slip>,\n" +
+                "  \"totalPicksDetected\": <integer>,\n" +
                 "  \"picks\": [\n" +
                 "    {\n" +
-                "      \"sectionIndex\": <integer, 1-based order on the slip>,\n" +
-                "      \"matchLabel\": \"<teams/event as read off the slip>\",\n" +
-                "      \"originalPick\": \"<the selection/market printed on the slip, if legible>\",\n" +
-                "      \"prediction\": \"<1, X, 2, or unreadable>\",\n" +
-                "      \"confidence\": \"High\" | \"Medium\" | \"Low\",\n" +
-                "      \"analysis\": \"<brief reasoning>\"\n" +
+                "      \"sectionIndex\":    <integer, 1-based>,\n" +
+                "      \"teamName\":        \"<Home Team vs Away Team>\",\n" +
+                "      \"originalPick\":    \"<market/selection printed on slip, if legible>\",\n" +
+                "      \"prediction\":      \"<1 | X | 2 | unreadable>\",\n" +
+                "      \"accuracyPercent\": <integer 0-100>,\n" +
+                "      \"reason\":          \"<one line, ~10 words>\"\n" +
                 "    }\n" +
                 "  ]\n" +
                 "}";
@@ -536,14 +490,6 @@ public class NvidiaAiService {
     // HTTP
     // ------------------------------------------------------------------
 
-    /**
-     * Single attempt against one provider+model. Short per-attempt timeout, and
-     * crucially NO retryWhen(Retry.max(0)) - that operator wraps the real error in
-     * RetryExhaustedException, which then fails the "instanceof ApiException" check
-     * in onErrorMap and produces the useless "Retries exhausted: 0/0" message that
-     * hid the actual cause. Omitting the operator entirely is how you say
-     * "do not retry"; the caller handles failover.
-     */
     @SuppressWarnings("unchecked")
     private String callChatCompletions(Map<String, Object> body, Attempt attempt, AttemptResult ar) {
 
@@ -583,7 +529,6 @@ public class NvidiaAiService {
                     HttpStatus.BAD_GATEWAY);
         }
 
-        // Some providers return {"error": {...}} with HTTP 200.
         Object errorNode = result.get("error");
         if (errorNode != null) {
             log.warn("[{}] HTTP 200 but body contains an error object: {}",
@@ -592,7 +537,6 @@ public class NvidiaAiService {
                     truncate(String.valueOf(errorNode), 400), HttpStatus.BAD_GATEWAY);
         }
 
-        // Token usage, useful for cost tracking on paid endpoints.
         Object usageObj = result.get("usage");
         if (usageObj instanceof Map<?, ?> usage) {
             ar.promptTokens = asInt(usage.get("prompt_tokens"));
@@ -600,8 +544,6 @@ public class NvidiaAiService {
             log.info("[{}] usage: prompt={} completion={} total={}",
                     attempt.label(), nz(ar.promptTokens), nz(ar.completionTokens),
                     nz(asInt(usage.get("total_tokens"))));
-            // Cerebras (gemma-4-31b) reports image tokens separately - useful to
-            // see how much of the prompt budget the image itself consumed.
             Object imageTokens = usage.get("image_tokens");
             if (imageTokens != null) {
                 log.info("[{}] image_tokens={}", attempt.label(), imageTokens);
@@ -625,8 +567,8 @@ public class NvidiaAiService {
         if (finish != null) {
             ar.finishReason = String.valueOf(finish);
             if ("length".equals(ar.finishReason)) {
-                log.warn("[{}] finish_reason=length - output was TRUNCATED by max_tokens, so the JSON " +
-                        "is likely incomplete. Raise max_tokens or lower the pick cap.", attempt.label());
+                log.warn("[{}] finish_reason=length — output was TRUNCATED; JSON likely incomplete. " +
+                        "Raise max_tokens or lower the pick cap.", attempt.label());
             } else {
                 log.debug("[{}] finish_reason={}", attempt.label(), ar.finishReason);
             }
@@ -653,25 +595,16 @@ public class NvidiaAiService {
         return text;
     }
 
-    /** Turns common HTTP codes into an actionable hint appended to the error. */
     private String explainStatus(int status) {
         return switch (status) {
-            case 400 -> " | Hint: NVIDIA/Gemini returns 400 for a malformed request or an unsupported/retired " +
-                    "model id - double check ai.nvidia.models and ai.gemini.models against the live catalog.";
-            case 401 -> " | Hint: API key invalid, wrong header, or missing the right scope.";
-            case 402 -> " | Hint: billing/credits required - this model id is no longer on the free tier, " +
-                    "or this key has depleted its included credits. If you configured multiple keys via " +
-                    "ai.<provider>.api-keys, the next key in the list will be tried automatically.";
-            case 403 -> " | Hint: Gemini - key not enabled for the Generative Language API, or a Pro " +
-                    "model was requested on a free-tier key. Cerebras - gated/dedicated-endpoint model.";
-            case 404 -> " | Hint: model id not found or retired. Verify it in the provider's catalog.";
-            case 413 -> " | Hint: payload too large - lower ai.image.max-edge-px.";
-            case 422 -> " | Hint: model likely does not accept image input (not a VLM). On Cerebras, " +
-                    "only gemma-4-31b currently supports images.";
-            case 429 -> " | Hint: rate limited. NVIDIA free tier is capped per minute; Gemini and Cerebras " +
-                    "free tiers are similarly limited. If multiple keys are configured via " +
-                    "ai.<provider>.api-keys, the next key will be tried automatically; otherwise the next " +
-                    "provider in the chain takes over.";
+            case 400 -> " | Hint: malformed request or unsupported/retired model id.";
+            case 401 -> " | Hint: API key invalid, wrong header, or missing scope.";
+            case 402 -> " | Hint: billing/credits required — model no longer on free tier.";
+            case 403 -> " | Hint: key not enabled for this API, or gated model.";
+            case 404 -> " | Hint: model id not found or retired. Verify in provider catalog.";
+            case 413 -> " | Hint: payload too large — lower ai.image.max-edge-px.";
+            case 422 -> " | Hint: model does not accept image input (not a VLM).";
+            case 429 -> " | Hint: rate limited. Next provider/key in chain will be tried.";
             case 503 -> " | Hint: model cold-starting or provider unavailable; retry shortly.";
             default -> "";
         };
@@ -744,7 +677,6 @@ public class NvidiaAiService {
         return out;
     }
 
-    /** JPEG cannot carry alpha; flatten to RGB first or encoding throws. */
     private BufferedImage toRgb(BufferedImage src) {
         if (src.getType() == BufferedImage.TYPE_INT_RGB) {
             return src;
@@ -819,14 +751,56 @@ public class NvidiaAiService {
                         break;
                     }
                     PickPrediction pick = new PickPrediction();
+
                     pick.setSectionIndex(pickNode.path("sectionIndex").asInt(
                             pickNode.path("matchNumber").asInt(count + 1)));
-                    pick.setMatchLabel(pickNode.path("matchLabel").asText(""));
+
+                    // teamName — primary new field; fall back to matchLabel for backwards compat
+                    String teamName = pickNode.path("teamName").asText("");
+                    if (isBlank(teamName)) {
+                        teamName = pickNode.path("matchLabel").asText("");
+                    }
+                    pick.setTeamName(teamName);
+
+                    // Keep matchLabel populated too so downstream callers aren't broken
+                    pick.setMatchLabel(teamName);
+
                     pick.setOriginalPick(pickNode.path("originalPick").asText(""));
                     pick.setPrediction(pickNode.path("prediction").asText(""));
-                    pick.setConfidence(pickNode.path("confidence").asText(""));
-                    pick.setAnalysis(pickNode.path("analysis").asText(
-                            pickNode.path("reason").asText("")));
+
+                    // accuracyPercent — primary new field; fall back to confidence string
+                    int accuracyPercent = pickNode.path("accuracyPercent").asInt(-1);
+                    if (accuracyPercent < 0) {
+                        // Legacy confidence string → numeric mapping
+                        String conf = pickNode.path("confidence").asText("").toLowerCase();
+                        accuracyPercent = switch (conf) {
+                            case "high"   -> 85;
+                            case "medium" -> 65;
+                            case "low"    -> 45;
+                            default       -> 0;
+                        };
+                    }
+                    pick.setAccuracyPercent(accuracyPercent);
+
+                    // Expose legacy confidence string for any callers that still use it
+                    String legacyConf = pickNode.path("confidence").asText("");
+                    if (isBlank(legacyConf)) {
+                        legacyConf = accuracyPercent >= 80 ? "High"
+                                : accuracyPercent >= 60 ? "Medium"
+                                  : "Low";
+                    }
+                    pick.setConfidence(legacyConf);
+
+                    // reason — primary new field; fall back to analysis / reason
+                    String reason = pickNode.path("reason").asText("");
+                    if (isBlank(reason)) {
+                        reason = pickNode.path("analysis").asText("");
+                    }
+                    pick.setReason(reason);
+
+                    // Keep analysis populated for downstream callers
+                    pick.setAnalysis(reason);
+
                     analysis.predictions.add(pick);
                     count++;
                 }
@@ -839,9 +813,6 @@ public class NvidiaAiService {
             }
 
         } catch (Exception ex) {
-            // Log it. The old code swallowed this silently and returned a
-            // valid-looking empty result, making parse failures indistinguishable
-            // from success upstream.
             log.warn("[{}] JSON parse FAILED: {}. First 500 chars of payload: {}",
                     label, ex.getMessage(), truncate(jsonText, 500));
             analysis.rawModelOutput = content;
@@ -850,7 +821,6 @@ public class NvidiaAiService {
         return analysis;
     }
 
-    /** Strips ```json fences etc, in case the model doesn't follow instructions perfectly. */
     private String extractJson(String content) {
         String trimmed = content.trim();
         if (trimmed.startsWith("```")) {
@@ -895,25 +865,17 @@ public class NvidiaAiService {
     }
 
     private static String truncate(String s, int max) {
-        if (s == null) {
-            return "null";
-        }
+        if (s == null) return "null";
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
 
-    /** Never print a key in full. Shows only enough to identify which key is loaded. */
     private static String mask(String key) {
-        if (isBlank(key)) {
-            return "<none>";
-        }
-        if (key.length() <= 8) {
-            return "****";
-        }
+        if (isBlank(key)) return "<none>";
+        if (key.length() <= 8) return "****";
         return key.substring(0, 4) + "****" + key.substring(key.length() - 3) +
                 " (len " + key.length() + ")";
     }
 
-    /** Replaces the base64 data URI with a placeholder so log files stay readable. */
     private String redactBody(Map<String, Object> body) {
         try {
             String json = objectMapper.writeValueAsString(body);
@@ -938,7 +900,6 @@ public class NvidiaAiService {
         return i == null ? "-" : String.valueOf(i);
     }
 
-    /** Walks the cause chain so wrapped exceptions still surface something useful. */
     private static String rootMessage(Throwable ex) {
         Throwable cur = ex;
         String msg = ex.getMessage();
