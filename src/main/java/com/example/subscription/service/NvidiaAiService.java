@@ -40,13 +40,13 @@ import java.util.stream.Stream;
  * image and produce per-pick predictions.
  *
  * Despite the class name (kept so existing injection points don't change), this
- * is no longer NVIDIA-only. It walks a chain of PROVIDERS, each with its own
- * model list. The default chain starts with NVIDIA's vision endpoint and can
- * fall back to other configured providers:
+ * is provider-neutral. It walks a chain of providers, each with its own model
+ * list. The default chain prioritizes general multimodal models and can fall
+ * back to a specialist vision model only at the end:
  *
- *   nvidia     https://integrate.api.nvidia.com/v1                       <- primary vision models
- *   gemini     https://generativelanguage.googleapis.com/v1beta/openai   <- optional fallback
- *   cerebras   https://api.cerebras.ai/v1                                <- optional fallback
+ *   openrouter https://openrouter.ai/api/v1                       <- primary free multimodal models
+ *   nvidia     https://integrate.api.nvidia.com/v1                <- secondary multimodal models
+ *   huggingface https://router.huggingface.co/v1                  <- optional last-resort VLM
  *
  * GEMINI NOTE: Google's Gemini API exposes an OpenAI-compatible endpoint at
  * /v1beta/openai/chat/completions. As of the free tier rules in effect since
@@ -101,8 +101,8 @@ public class NvidiaAiService {
 
     // ---- provider chain -------------------------------------------------
 
-    /** Ordered, comma-separated provider ids to try. NVIDIA is the default vision provider. */
-    @Value("${ai.providers:nvidia,gemini,cerebras}")
+    /** Ordered, comma-separated provider ids to try. */
+    @Value("${ai.providers:openrouter,nvidia,huggingface}")
     private String providersRaw;
 
     /**
@@ -323,7 +323,7 @@ public class NvidiaAiService {
     /**
      * Builds the full ordered list of attempts.
      *
-     * For each provider id in ai.providers (default "nvidia,gemini,cerebras"):
+     * For each provider id in ai.providers (default "openrouter,nvidia,huggingface"):
      *   1. Resolve its base URL and model list (falling back to the built-in
      *      defaults in defaultBaseUrl()/defaultModels() if not configured).
      *   2. Resolve its API key(s):
@@ -404,7 +404,9 @@ public class NvidiaAiService {
 
     private String defaultBaseUrl(String id) {
         return switch (id) {
+            case "openrouter" -> "https://openrouter.ai/api/v1";
             case "nvidia" -> "https://integrate.api.nvidia.com/v1";
+            case "huggingface" -> "https://router.huggingface.co/v1";
             case "gemini" -> "https://generativelanguage.googleapis.com/v1beta/openai";
             case "cerebras" -> "https://api.cerebras.ai/v1";
             default -> null;
@@ -412,7 +414,8 @@ public class NvidiaAiService {
     }
 
     /**
-     * Vision-capable defaults.
+     * Multimodal-capable defaults. The final model for the primary providers is
+     * intentionally a specialist vision fallback, while Hugging Face is optional.
      *
      * VERIFY these against the provider's live catalog before deploying - model
      * ids and free-tier eligibility change, and a retired id returns a 404 that
@@ -422,18 +425,24 @@ public class NvidiaAiService {
      */
     private String defaultModels(String id) {
         return switch (id) {
+            case "openrouter" -> String.join(",",
+                    "minimax/minimax-m3:free",
+                    "google/gemma-4-31b-it:free",
+                    "google/gemma-4-26b-a4b-it:free",
+                    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free");
             case "nvidia" -> String.join(",",
-                    "meta/llama-3.2-90b-vision-instruct",
-                    "meta/llama-3.2-11b-vision-instruct");
-            // Free-tier (Flash-class) Gemini models only - Pro models have been
-            // paid-only since 2026-04-01 and will 402/permission-error here.
+                    "minimaxai/minimax-m3",
+                    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                    "nvidia/nemotron-nano-12b-v2-vl",
+                    "meta/llama-3.2-90b-vision-instruct");
+            // Optional last-resort HF vision model; only used if HF_TOKEN is set.
+            case "huggingface" -> "Qwen/Qwen2.5-VL-7B-Instruct";
+            // Optional providers retained for backwards compatibility.
             case "gemini" -> String.join(",",
                     "gemini-2.5-flash",
                     "gemini-2.5-flash-lite",
                     "gemini-3-flash",
                     "gemini-3.1-flash-lite");
-            // gemma-4-31b is currently the only vision-capable model Cerebras
-            // serves on the shared/free tier.
             case "cerebras" -> "gemma-4-31b";
             default -> "";
         };
